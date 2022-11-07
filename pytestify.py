@@ -25,6 +25,8 @@ from fissix.fixer_util import (
     KeywordArg,
     ArgList,
     touch_import,
+    LParen,
+    RParen,
 )
 from fissix.pygram import python_symbols as syms
 
@@ -117,6 +119,7 @@ def kw(name, **kwargs):
 # TODO : Add this to fissix.fixer_util
 def Assert(test, message=None, **kwargs):
     """Build an assertion statement"""
+    assert message is None
     if not isinstance(test, list):
         test = [test]
     test[0].prefix = " "
@@ -208,8 +211,8 @@ def conversion(func):
                 print(f"With: {assertion}")
                 print()
 
-            node.replace(assertion)
             return assertion
+        return node
 
     return wrapper
 
@@ -228,6 +231,7 @@ def assertmethod_to_assert(node, capture, arguments):
 
     .. etc
     """
+    print(node.get_lineno())
     function_name = capture["function_name"].value
     invert = function_name in INVERT_FUNCTIONS
     function_name = SYNONYMS.get(function_name, function_name)
@@ -409,15 +413,39 @@ def handle_assertraises(node, capture, arguments):
 
         --> pytest.raises(ValueError, func, arg1)
     """
-    capture['attr1'].replace(
-        kw('pytest', prefix=capture['attr1'].prefix)
-    )
-    capture['attr2'].replace(
-        Node(syms.trailer, [Dot(), kw('raises', prefix='')])
-    )
+    capture["attr1"].replace(kw("pytest", prefix=capture["attr1"].prefix))
+    capture["attr2"].replace(Node(syms.trailer, [Dot(), kw("raises", prefix="")]))
 
     # Adds a 'import pytest' if there wasn't one already
     touch_import(None, "pytest", node)
+
+
+@conversion
+def handle_django_pytest(node, capture, arguments):
+    """
+
+    self.{function_name}
+        --> from pytest_django.assert import {function_name}
+            {function_name}
+    """
+
+    function_name = capture["function_name"].value
+    touch_import("pytest_django.asserts", function_name, node)
+
+    return Node(
+        syms.power,
+        [Leaf(TOKEN.NAME, function_name), capture["function_parameters"].clone()],
+        prefix=node.prefix,
+    )
+
+
+def handle_testclass(node, capture, filename):
+    class_children = capture["class_def"].children[-1]
+    assert class_children.type == syms.suite
+
+    # breakpoint()
+    return [x.clone() for x in class_children.children]
+    # return parenthesize(class_children.children())
 
 
 def main():
@@ -516,12 +544,23 @@ def main():
         .modify(callback=assertalmostequal_to_assert)
         .select_method("assertNotAlmostEqual")
         .modify(callback=assertalmostequal_to_assert)
-        .select("""
+        .select_method("assertContains")
+        .is_call()
+        .modify(callback=handle_django_pytest)
+        .select_method("assertNotContains")
+        .is_call()
+        .modify(callback=handle_django_pytest)
+        .select_method("assertFormError")
+        .is_call()
+        .modify(callback=handle_django_pytest)
+        .select(
+            """
             function_call=power<
                 attr1="self" attr2=trailer< "." "assertRaises" >
                 trailer< '(' function_arguments=any* ')' >
             >
-        """)
+        """
+        )
         .modify(callback=handle_assertraises)
         # Actually run all of the above.
         .execute(
